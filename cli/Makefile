@@ -9,6 +9,13 @@ env:
 test: env
 	bin/test.sh
 
+binary: clean env packages
+	rm -rf dist build
+	pyinstaller binary/binary.spec
+
+test-binary: env
+	bin/test-binary.sh
+
 doc: env
 	bin/doc.sh
 
