@@ -598,8 +598,8 @@ def humanize_bytes(b):
 
     :param b: number of bytes
     :type b: number
-    :returns: human representation of a number of bytes
     :rtype: str
+    :returns: human representation of a number of bytes
     """
 
     abbrevs = (

@@ -2,13 +2,17 @@ from __future__ import print_function
 
 import json
 import os
+import platform
 import shutil
+import stat
 import subprocess
 import sys
 from subprocess import PIPE, Popen
 
 from dcos import constants, emitting, util
 from dcos.errors import DCOSException
+
+from six.moves import urllib
 
 logger = util.get_logger(__name__)
 emitter = emitting.FlatEmitter()
@@ -52,19 +56,36 @@ def get_package_commands(package_name):
     :returns: list of all the dcos program paths in package
     :rtype: [str]
     """
-    bin_dir = os.path.join(_package_dir(package_name),
-                           constants.DCOS_SUBCOMMAND_VIRTUALENV_SUBDIR,
-                           BIN_DIRECTORY)
 
     executables = []
-    for filename in os.listdir(bin_dir):
-        path = os.path.join(bin_dir, filename)
 
-        if (filename.startswith(constants.DCOS_COMMAND_PREFIX) and
-                _is_executable(path)):
+    # find executables in virtualenv
+    virtualenv_bin_dir = \
+        os.path.join(_package_dir(package_name),
+                     constants.DCOS_SUBCOMMAND_VIRTUALENV_SUBDIR,
+                     BIN_DIRECTORY)
 
-            executables.append(path)
+    if os.path.exists(virtualenv_bin_dir):
+        for filename in os.listdir(virtualenv_bin_dir):
+            path = os.path.join(virtualenv_bin_dir, filename)
 
+            if (filename.startswith(constants.DCOS_COMMAND_PREFIX) and
+                    _is_executable(path)):
+
+                executables.append(path)
+
+    # find executables in subcommand bin dir
+    bin_dir = os.path.join(_package_dir(package_name),
+                           BIN_DIRECTORY)
+
+    if os.path.exists(bin_dir):
+        for filename in os.listdir(bin_dir):
+            path = os.path.join(bin_dir, filename)
+
+            if (filename.startswith(constants.DCOS_COMMAND_PREFIX) and
+                    _is_executable(path)):
+
+                executables.append(path)
     return executables
 
 
@@ -119,6 +140,10 @@ def distributions():
         return [
             subdir for subdir in os.listdir(subcommand_dir)
             if os.path.isdir(
+                os.path.join(
+                    subcommand_dir,
+                    subdir)) or
+            os.path.isdir(
                 os.path.join(
                     subcommand_dir,
                     subdir,
@@ -219,8 +244,32 @@ def _write_package_json(pkg):
         json.dump(package_json, package_file)
 
 
+def _get_cli_binary(resources):
+    """Find compatible cli binary, if one exists
+
+    :param resources: resource.json
+    :type resources: {}
+    :returns: cli binary
+    :rtype: str or None
+    """
+    cli = resources.get("cli")
+    if cli and cli.get("binaries"):
+        arch = platform.architecture()[0]
+        if arch != "64bit":
+            logger.debug("Unsupported archecture {}\n", arch)
+            return None
+        system = platform.system().lower()
+        if system == "darwin":
+            system = "osx"
+        binary = cli["binaries"].get(system)
+        if binary:
+            return binary.get("x86-64")
+
+    return None
+
+
 def _install_env(pkg, options):
-    """ Install subcommand virtual env.
+    """Install subcommand virtual env.
 
     :param pkg: the package to install
     :type pkg: PackageVersion
@@ -231,19 +280,32 @@ def _install_env(pkg, options):
 
     pkg_dir = _package_dir(pkg.name())
 
-    install_operation = pkg.command_json(options)
+    resources = pkg.resource_json()
+    binary_cli = _get_cli_binary(resources)
+    env_dir = os.path.join(pkg_dir)
 
-    env_dir = os.path.join(pkg_dir,
-                           constants.DCOS_SUBCOMMAND_VIRTUALENV_SUBDIR)
-
-    if 'pip' in install_operation:
-        _install_with_pip(
+    if binary_cli:
+        _install_with_binary(
             pkg.name(),
             env_dir,
-            install_operation['pip'])
+            binary_cli)
     else:
-        raise DCOSException("Installation methods '{}' not supported".format(
-            install_operation.keys()))
+        install_operation = pkg.command_json(options)
+
+        virtualenv_dir = os.path.join(
+            pkg_dir,
+            constants.DCOS_SUBCOMMAND_VIRTUALENV_SUBDIR
+        )
+
+        if 'pip' in install_operation:
+            _install_with_pip(
+                pkg.name(),
+                virtualenv_dir,
+                install_operation['pip'])
+        else:
+            raise DCOSException(
+                "Installation methods '{}' not supported".format(
+                    install_operation.keys()))
 
 
 def install(pkg, options):
@@ -318,6 +380,46 @@ def _find_virtualenv(bin_directory):
         raise DCOSException('Unable to find the virtualenv program')
 
     return virtualenv_path
+
+
+def _install_with_binary(
+        package_name,
+        env_directory,
+        binary_cli):
+    """
+    :param package_name: the name of the package
+    :type package_name: str
+    :param env_directory: the path to the directory in which to install the
+                          package's virtual env
+    :type env_directory: str
+    :param binary_cli: binary cli to install
+    :type binary_cli: str
+    :rtype: None
+    """
+
+    # Do not replace util.temptext NamedTemporaryFile
+    # otherwise bad things will happen on Windows
+    with util.temptext() as text_file:
+        fd, requirement_path = text_file
+
+        try:
+            binary_name = "dcos-{}".format(package_name)
+            bin_dir = os.path.join(env_directory, os.path.join(BIN_DIRECTORY))
+            if not os.path.exists(bin_dir):
+                os.makedirs(bin_dir)
+            binary_file = os.path.join(bin_dir, binary_name)
+            urllib.request.urlretrieve(binary_cli, binary_file)
+            # make binary executable
+            st = os.stat(binary_file)
+            os.chmod(binary_file, st.st_mode | stat.S_IEXEC)
+
+        except Exception as e:
+            emitter.publish(e)
+            shutil.rmtree(env_directory)
+
+            raise _generic_error(package_name)
+
+    return None
 
 
 def _install_with_pip(

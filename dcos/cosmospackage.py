@@ -356,7 +356,7 @@ class CosmosPackageVersion():
 
         return self._config_json
 
-    def _resource_json(self):
+    def resource_json(self):
         """Returns the JSON content of the resource.json file.
 
         :returns: Package resources
